@@ -1,198 +1,144 @@
-# mental_health_model.py
+import os
+import warnings
 import pandas as pd
 import numpy as np
-import shap
-import gradio as gr
-from transformers import pipeline
-from sklearn.pipeline import Pipeline
-from sklearn.compose import ColumnTransformer
-from sklearn.ensemble import RandomForestClassifier
+import seaborn as sns
+import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split, GridSearchCV
-from sklearn.metrics import (accuracy_score, precision_score, 
-                           recall_score, f1_score, roc_auc_score)
-from sklearn.preprocessing import StandardScaler, OneHotEncoder
-from lime.lime_tabular import LimeTabularExplainer
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.ensemble import RandomForestClassifier
+from xgboost import XGBClassifier
+from sklearn.metrics import (classification_report, accuracy_score, precision_score,
+                             recall_score, f1_score, roc_auc_score)
+import shap
 import joblib
-import warnings
-warnings.filterwarnings('ignore')
 
-# ======================
-# Data Preparation
-# ======================
-def load_and_preprocess_data():
-    df = pd.read_csv('data/raw/depression_anxiety_data.csv')
-    
-    # Clean and transform data
-    bool_cols = ['depressiveness', 'suicidal', 'depression_diagnosis',
-                'depression_treatment', 'anxiousness', 'anxiety_diagnosis',
-                'anxiety_treatment', 'sleepiness']
-    
-    df[bool_cols] = df[bool_cols].replace({'TRUE': 1, 'FALSE': 0, 'NA': np.nan})
-    df['bmi'] = pd.to_numeric(df['bmi'], errors='coerce')
-    
-    # Feature engineering
-    df['mental_health_score'] = 0.6*df['phq_score'] + 0.4*df['gad_score']
-    df['bmi_category'] = pd.cut(df['bmi'], bins=[0, 18.5, 25, 30, 35, 40, np.inf],
-                               labels=['Underweight', 'Normal', 'Overweight',
-                                       'Obese I', 'Obese II', 'Obese III'])
-    
-    # Handle missing values
-    num_cols = ['age', 'bmi', 'phq_score', 'gad_score', 'epworth_score']
-    cat_cols = ['gender', 'who_bmi', 'depression_severity', 'anxiety_severity']
-    
-    df[num_cols] = df[num_cols].fillna(df[num_cols].median())
-    for col in cat_cols + ['bmi_category']:
-        df[col] = df[col].fillna(df[col].mode()[0])
-    
-    return df
+warnings.filterwarnings("ignore")
 
-# ======================
-# Model Development
-# ======================
-class MentalHealthClassifier:
-    def __init__(self):
-        self.model = None
-        self.preprocessor = None
-        self.explainer = None
-        self.features = ['age', 'gender', 'bmi', 'phq_score', 
-                        'gad_score', 'epworth_score', 'bmi_category']
-        
-    def train(self, df):
-        X = df[self.features]
-        y = df['depression_diagnosis']
-        
-        # Preprocessing pipeline
-        numeric_features = ['age', 'bmi', 'phq_score', 'gad_score', 'epworth_score']
-        categorical_features = ['gender', 'bmi_category']
-        
-        self.preprocessor = ColumnTransformer([
-            ('num', StandardScaler(), numeric_features),
-            ('cat', OneHotEncoder(handle_unknown='ignore'), categorical_features)
-        ])
-        
-        # Model pipeline
-        pipeline = Pipeline([
-            ('preprocessor', self.preprocessor),
-            ('classifier', RandomForestClassifier(class_weight='balanced'))
-        ])
-        
-        # Hyperparameter tuning
-        param_grid = {
-            'classifier__n_estimators': [100, 200],
-            'classifier__max_depth': [None, 5, 10]
-        }
-        
-        self.model = GridSearchCV(pipeline, param_grid, cv=3, scoring='f1')
-        self.model.fit(X, y)
-        
-        # Create explainers
-        self.create_explainers(X)
-        
-    def create_explainers(self, X):
-        # SHAP explainer
-        processed_data = self.preprocessor.transform(X)
-        self.shap_explainer = shap.TreeExplainer(self.model.best_estimator_.named_steps['classifier'])
-        
-        # LIME explainer
-        self.lime_explainer = LimeTabularExplainer(
-            training_data=self.preprocessor.transform(X),
-            feature_names=self.preprocessor.get_feature_names_out(),
-            class_names=['No Depression', 'Depression'],
-            mode='classification'
-        )
-    
-    def predict(self, input_data):
-        processed_input = self.preprocessor.transform(input_data)
-        prediction = self.model.predict(input_data)
-        probability = self.model.predict_proba(input_data)
-        return prediction[0], probability[0][1]
-    
-    def explain_prediction(self, input_data):
-        # SHAP explanation
-        processed_input = self.preprocessor.transform(input_data)
-        shap_values = self.shap_explainer.shap_values(processed_input)
-        shap_plot = shap.force_plot(self.shap_explainer.expected_value[1],
-                                  shap_values[1][0],
-                                  processed_input[0],
-                                  feature_names=self.preprocessor.get_feature_names_out())
-        
-        # LIME explanation
-        lime_exp = self.lime_explainer.explain_instance(processed_input[0],
-                                                      self.model.best_estimator_.predict_proba,
-                                                      num_features=10)
-        return shap_plot, lime_exp.as_list()
+# ----------------------------
+# 1. Data Preparation
+# ----------------------------
 
-# ======================
-# LLM Integration
-# ======================
-class MentalHealthAdvisor:
-    def __init__(self):
-        self.llm = pipeline('text-generation', model='gpt2')
-        
-    def generate_advice(self, prediction, probability):
-        prompt = f"""Based on the prediction of {'Depression' if prediction else 'No Depression'} 
-        with {probability:.2f} confidence, provide 3 coping strategies:"""
-        return self.llm(prompt, max_length=200)[0]['generated_text']
+data_path = os.path.join("data/raw/depression_anxiety_data.csv")
+data = pd.read_csv(data_path)
 
-# ======================
-# Gradio Interface
-# ======================
-def create_gradio_interface(model, advisor):
-    def predict_health(age, gender, bmi, phq, gad, epworth):
-        input_df = pd.DataFrame([[age, gender, bmi, phq, gad, epworth, 'Normal']],
-                              columns=model.features)
-        prediction, probability = model.predict(input_df)
-        advice = advisor.generate_advice(prediction, probability)
-        
-        # Generate explanations
-        shap_plot, lime_exp = model.explain_prediction(input_df)
-        
-        return {
-            'diagnosis': 'Depression' if prediction else 'No Depression',
-            'probability': f'{probability:.2%}',
-            'advice': advice,
-            'shap_plot': shap_plot,
-            'lime_explanation': lime_exp
-        }
-    
-    interface = gr.Interface(
-        fn=predict_health,
-        inputs=[
-            gr.Number(label="Age"),
-            gr.Dropdown(["male", "female"], label="Gender"),
-            gr.Number(label="BMI"),
-            gr.Slider(0, 27, step=1, label="PHQ-9 Score"),
-            gr.Slider(0, 21, step=1, label="GAD-7 Score"),
-            gr.Slider(0, 24, step=1, label="Epworth Sleepiness Score")
-        ],
-        outputs=[
-            gr.Textbox(label="Diagnosis"),
-            gr.Textbox(label="Probability"),
-            gr.Textbox(label="Coping Strategies"),
-            gr.Plot(label="SHAP Explanation"),
-            gr.JSON(label="LIME Explanation")
-        ],
-        title="Mental Health Analysis System",
-        description="Predict mental health conditions based on symptoms"
-    )
-    
-    return interface
+# --- Data Cleaning & Preprocessing ---
+data.drop_duplicates(inplace=True)
+# Fill numeric columns with median
+data.fillna(data.median(numeric_only=True), inplace=True)
+# Fill categorical columns with mode
+for col in data.select_dtypes(include=['object']).columns:
+    data[col].fillna(data[col].mode()[0], inplace=True)
 
-# ======================
-# Main Execution
-# ======================
-if __name__ == "__main__":
-    # Load and preprocess data
-    df = load_and_preprocess_data()
+# Encode categorical variables using LabelEncoder
+label_encoders = {}
+for col in data.select_dtypes(include=['object']).columns:
+    le = LabelEncoder()
+    data[col] = le.fit_transform(data[col])
+    label_encoders[col] = le
+
+# --- Exploratory Data Analysis (EDA) ---
+# Plot distribution of target variable
+plt.figure(figsize=(10, 6))
+sns.countplot(x='suicidal', data=data)
+plt.title("Distribution of Suicidal Cases")
+plt.savefig("models/eda_countplot.png")
+plt.close()
+
+# Plot heatmap of feature correlations
+plt.figure(figsize=(12, 8))
+sns.heatmap(data.corr(), annot=True, cmap="coolwarm")
+plt.title("Feature Correlation Matrix")
+plt.savefig("models/eda_heatmap.png")
+plt.close()
+
+# --- Feature Engineering & Selection ---
+X = data.drop(columns=['suicidal', 'id'], errors='ignore')
+y = data['suicidal']
+
+# Use Random Forest to rank features and select the top 10 features
+rf = RandomForestClassifier(random_state=42)
+rf.fit(X, y)
+feature_importances = pd.DataFrame({'Feature': X.columns, 'Importance': rf.feature_importances_})
+feature_importances.sort_values(by='Importance', ascending=False, inplace=True)
+selected_features = feature_importances["Feature"].values[:10]
+X = X[selected_features]
+
+# ----------------------------
+# 2. Model Development
+# ----------------------------
+
+# Split data into training and testing sets
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42
+)
+
+# Standardize numerical features
+scaler = StandardScaler()
+X_train = scaler.fit_transform(X_train)
+X_test = scaler.transform(X_test)
+
+# --- Model Training with Hyperparameter Tuning ---
+rf_params = {'n_estimators': [100, 200], 'max_depth': [None, 10, 20]}
+xgb_params = {'n_estimators': [100, 200], 'max_depth': [3, 6]}
+
+# Grid Search for RandomForest
+rf_grid = GridSearchCV(RandomForestClassifier(random_state=42), 
+                       rf_params, cv=3, scoring='accuracy')
+rf_grid.fit(X_train, y_train)
+rf_best = rf_grid.best_estimator_
+
+# Grid Search for XGBoost
+xgb_grid = GridSearchCV(XGBClassifier(eval_metric='logloss'), 
+                        xgb_params, cv=3, scoring='accuracy')
+xgb_grid.fit(X_train, y_train)
+xgb_best = xgb_grid.best_estimator_
+
+# --- Model Evaluation ---
+def evaluate_model(model, X_test, y_test, model_name):
+    y_pred = model.predict(X_test)
+    accuracy = accuracy_score(y_test, y_pred)
+    precision = precision_score(y_test, y_pred, average='weighted')
+    recall = recall_score(y_test, y_pred, average='weighted')
+    f1 = f1_score(y_test, y_pred, average='weighted')
+    try:
+        # For binary classification; adjust if multiclass
+        roc_auc = roc_auc_score(y_test, model.predict_proba(X_test)[:,1])
+    except Exception:
+        roc_auc = 'N/A'
     
-    # Train model
-    classifier = MentalHealthClassifier()
-    classifier.train(df)
-    joblib.dump(classifier, 'mental_health_model.pkl')
+    print(f"--- {model_name} ---")
+    print(f"Accuracy:  {accuracy:.4f}")
+    print(f"Precision: {precision:.4f}")
+    print(f"Recall:    {recall:.4f}")
+    print(f"F1 Score:  {f1:.4f}")
+    print(f"ROC-AUC:   {roc_auc}")
+    print(classification_report(y_test, y_pred))
     
-    # Initialize advisor
-    advisor = MentalHealthAdvisor()
-    
-    # Create and launch interface
-    interface = create_gradio_interface(classifier, advisor)
-    interface.launch()
+evaluate_model(rf_best, X_test, y_test, "Random Forest")
+evaluate_model(xgb_best, X_test, y_test, "XGBoost")
+
+# --- Model Interpretation using SHAP ---
+# Create a TreeExplainer for the Random Forest model
+explainer = shap.TreeExplainer(rf_best, X_train)
+shap_values = explainer.shap_values(X_test, check_additivity=False)
+if isinstance(shap_values, list):
+    shap_vals_to_plot = shap_values[1]
+else:
+    shap_vals_to_plot = shap_values
+
+# Save the SHAP summary plot
+shap.summary_plot(shap_vals_to_plot, X_test, show=False)
+plt.savefig('models/shap_summary.png')
+plt.close()
+
+# ----------------------------
+# Save Trained Models and Artifacts
+# ----------------------------
+os.makedirs("models", exist_ok=True)
+joblib.dump(rf_best, os.path.join("models/random_forest_model.pkl"))
+joblib.dump(xgb_best, os.path.join("models/xgboost_model.pkl"))
+joblib.dump(scaler, os.path.join("models/scaler.pkl"))
+joblib.dump(selected_features, os.path.join("models/selected_features.pkl"))
+
+print("Data preprocessing, model training, and evaluation complete. Models and artifacts saved.")
