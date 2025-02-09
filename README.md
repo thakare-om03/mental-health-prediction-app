@@ -41,7 +41,36 @@ This application is built for easy integration into chatbots or web-based interf
   - Random Forest Classifier (with hyperparameter tuning using GridSearchCV)
   - XGBoost Classifier (also tuned with GridSearchCV)
 - **Evaluation:** Models are evaluated using Accuracy, Precision, Recall, F1 Score, and ROC-AUC metrics. SHAP analysis is performed to provide interpretability for the predictions.
-  
+
+### Old Pipeline: Target = 'suicidal' 
+#### Achieving 94% Accuracy
+- **Feature Selection:** Top 10 features are selected based on feature importance from a Random Forest classifier.
+- **Data Splitting:** Data is split into training and testing sets.
+- **Standardization:** Features are standardized using StandardScaler.
+- **Hyperparameter Tuning:** GridSearchCV is used for hyperparameter tuning with 'accuracy' as the scoring metric.
+- **Model Evaluation:** Models are evaluated using the `evaluate_model` function.
+
+### New Pipeline: Target = 'anxiety_diagnosis' 
+#### Achieving 98% Accuracy
+- **Feature Selection:** Top 10 features are selected based on feature importance from a Random Forest classifier.
+- **Data Splitting:** Data is split into training and testing sets.
+- **Standardization:** Features are standardized using StandardScaler.
+- **Class Imbalance Handling:** The ratio of negative to positive cases is computed for XGBoost to handle class imbalance.
+- **Hyperparameter Tuning:** GridSearchCV is used for hyperparameter tuning with 'f1' as the scoring metric.
+- **Model Evaluation:** Models are evaluated using the `evaluate_model` function.
+
+### Model Comparison
+- **Comparison:** Metrics from all four models (Old RF, Old XGB, New RF, New XGB) are combined into a single DataFrame for comparison.
+- **Average Accuracy:** Average accuracy across all models is calculated and printed.
+- **Visualization:** A grouped bar chart is plotted to compare the performance metrics of the models.
+
+### SHAP Interpretation
+- **SHAP Analysis:** SHAP analysis is performed for the new Random Forest model to provide interpretability for the predictions.
+- **Visualization:** A SHAP summary plot is generated and saved.
+
+### Saving Models and Artifacts
+- **Saving:** The trained models, scaler, and selected features are saved using joblib.
+
 ## LLM Explanation Module
 A natural language explanation is generated using a text-generation pipeline based on DistilGPT-2. The LLM component:
 - Receives a prompt that summarizes the patient data and the model predictions.
@@ -62,13 +91,12 @@ This project was developed as part of the Arogo AI AI/ML Engineer Intern Assignm
 pip install --upgrade pip
 pip install -r requirements.txt
 ```
-
-## How to Run the Files
-1. Run the prediction script:
-   ```bash
-   python src/predict_mental_health.py
-   ```
-2. Launch the Streamlit UI:
-   ```bash
-   streamlit run src/mental_health_ui.py
-   ```
+### How to Run the Files
+Run the prediction script:
+```bash
+python src/predict_mental_health.py
+```
+Launch the Streamlit UI:
+```bash
+streamlit run src/mental_health_ui.py
+```
