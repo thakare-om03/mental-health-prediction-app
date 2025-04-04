@@ -1,0 +1,17 @@
+# temp/config.yaml
+data:
+  raw_depression_anxiety: "data/raw/depression_anxiety_data.csv"
+  # Add path to survey.csv if you decide to use it
+  # raw_survey: "data/raw/survey.csv"
+models:
+  output_dir: "models"
+  scaler_file: "scaler.joblib"
+  label_encoder_file: "label_encoder.joblib"
+  features_file: "features.joblib"
+  random_forest_file: "random_forest_model.joblib"
+  xgboost_file: "xgboost_model.joblib"
+  # Add other model filenames if needed
+llm:
+  provider: "groq" # Keep this aligned with llm_explanations.py
+  # Add API key storage method reference (e.g., env variable name) if needed
+  # api_key_env: "GROQ_API_KEY"

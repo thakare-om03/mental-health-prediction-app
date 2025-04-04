@@ -1,11 +1,10 @@
-scikit-learn
+# temp/requirements.txt
 pandas
-numpy
-shap
-gradio
-transformers
-torch
+scikit-learn
 xgboost
-imbalanced-learn
 joblib
 streamlit
+groq # For explanations
+PyYAML # For config file
+numpy
+# Add specific versions if needed, e.g., pandas==2.1.0
