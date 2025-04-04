@@ -1,268 +1,271 @@
-import os
-import warnings
+# temp/src/predict_mental_health.py
 import pandas as pd
 import numpy as np
-import seaborn as sns
-import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.ensemble import RandomForestClassifier
-from xgboost import XGBClassifier
-from sklearn.metrics import (
-    classification_report, accuracy_score, precision_score,
-    recall_score, f1_score, roc_auc_score
-)
-import shap
+from sklearn.metrics import classification_report, accuracy_score, confusion_matrix, f1_score
+import xgboost as xgb
 import joblib
+import yaml # Add pyyaml to requirements.txt
+import logging
+from pathlib import Path
+import warnings
+import os
 
-# Suppress warnings for cleaner output
-warnings.filterwarnings("ignore")
+# Setup logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-###############################################
-# 1. Common Data Loading and Preprocessing
-###############################################
-# Read the CSV file into a DataFrame.
-data_path = os.path.join("data", "raw", "depression_anxiety_data.csv")
-data = pd.read_csv(data_path)
-
-# Remove duplicate rows to ensure data quality.
-data.drop_duplicates(inplace=True)
-
-# Fill missing numeric values with the median and categorical values with the mode.
-data.fillna(data.median(numeric_only=True), inplace=True)
-for col in data.select_dtypes(include=['object']).columns:
-    data[col].fillna(data[col].mode()[0], inplace=True)
-
-# Encode all categorical variables using LabelEncoder.
-# This converts text labels into numerical values.
-label_encoders = {}
-for col in data.select_dtypes(include=['object']).columns:
-    le = LabelEncoder()
-    data[col] = le.fit_transform(data[col])
-    label_encoders[col] = le
-
-###############################################
-# 2. Define an Evaluation Function
-###############################################
-def evaluate_model(model, X_test, y_test, model_name):
-    """
-    Evaluate a model on test data and print overall performance metrics.
-    
-    Parameters:
-      model: The trained model to be evaluated.
-      X_test: Test feature matrix.
-      y_test: Test target vector.
-      model_name: Name of the model for display.
-    
-    Returns:
-      A dictionary containing Accuracy, Precision, Recall, F1 Score, and ROC-AUC.
-    """
-    y_pred = model.predict(X_test)
-    acc = accuracy_score(y_test, y_pred)
-    prec = precision_score(y_test, y_pred, average='weighted', zero_division=0)
-    rec = recall_score(y_test, y_pred, average='weighted', zero_division=0)
-    f1 = f1_score(y_test, y_pred, average='weighted', zero_division=0)
+# --- Configuration Loading ---
+def load_config(config_path="config.yaml"):
+    """Loads configuration from a YAML file."""
     try:
-        roc = roc_auc_score(y_test, model.predict_proba(X_test)[:, 1])
-    except Exception:
-        roc = np.nan
-    # Print detailed model performance
-    print(f"--- {model_name} ---")
-    print(f"Accuracy:  {acc:.4f}")
-    print(f"Precision: {prec:.4f}")
-    print(f"Recall:    {rec:.4f}")
-    print(f"F1 Score:  {f1:.4f}")
-    print(f"ROC-AUC:   {roc}")
-    print(classification_report(y_test, y_pred, zero_division=0))
-    return {'Accuracy': acc, 'Precision': prec, 'Recall': rec, 'F1 Score': f1, 'ROC-AUC': roc}
+        with open(config_path, 'r') as f:
+            config = yaml.safe_load(f)
+        logging.info("Configuration loaded successfully.")
+        return config
+    except FileNotFoundError:
+        logging.error(f"Configuration file not found at {config_path}")
+        raise
+    except Exception as e:
+        logging.error(f"Error loading configuration: {e}")
+        raise
 
-###############################################
-# 3. OLD PIPELINE: Target = 'suicidal'
-###############################################
-# This section implements the original pipeline using 'suicidal' as the target.
+# --- Data Loading and Cleaning ---
+def load_and_clean_data(file_path):
+    """Loads and performs initial cleaning on the dataset."""
+    logging.info(f"Loading data from {file_path}...")
+    try:
+        df = pd.read_csv(file_path)
+        logging.info("Data loaded successfully.")
 
-# Separate features and target. Remove the 'suicidal' column and 'id' from features.
-X_old = data.drop(columns=['suicidal', 'id'], errors='ignore')
-y_old = data['suicidal']
+        # Basic Cleaning Example (Expand as needed)
+        # Handle specific known issues like BMI=0 meaning "Not Available"
+        df['bmi'] = df['bmi'].replace(0, np.nan) # Replace 0 BMI with NaN
 
-# Use a Random Forest to determine feature importance and select the top 10 features.
-rf_fs_old = RandomForestClassifier(random_state=42)
-rf_fs_old.fit(X_old, y_old)
-fi_old = pd.DataFrame({'Feature': X_old.columns, 'Importance': rf_fs_old.feature_importances_})
-fi_old.sort_values(by='Importance', ascending=False, inplace=True)
-top_features_old = fi_old["Feature"].values[:10]
-X_old = X_old[top_features_old]
+        # Impute missing numerical values (e.g., with median) - apply to relevant columns
+        for col in ['age', 'bmi', 'phq_score', 'gad_score', 'epworth_score']:
+             if col in df.columns and df[col].isnull().any():
+                median_val = df[col].median()
+                df[col].fillna(median_val, inplace=True)
+                logging.info(f"Imputed NaNs in '{col}' with median ({median_val}).")
 
-# Split the data into training and testing sets.
-X_train_old, X_test_old, y_train_old, y_test_old = train_test_split(
-    X_old, y_old, test_size=0.2, random_state=42
-)
+        # Drop rows where the target variable is missing (if applicable)
+        target_col = 'depressiveness' # Adjust if target changes
+        if target_col in df.columns and df[target_col].isnull().any():
+             initial_rows = len(df)
+             df.dropna(subset=[target_col], inplace=True)
+             logging.warning(f"Dropped {initial_rows - len(df)} rows due to missing target ('{target_col}').")
 
-# Standardize features using StandardScaler.
-scaler_old = StandardScaler()
-X_train_old = scaler_old.fit_transform(X_train_old)
-X_test_old = scaler_old.transform(X_test_old)
+        # Handle inconsistent categorical data (Example for Gender if using survey.csv)
+        # if 'Gender' in df.columns:
+        #     df['Gender'] = df['Gender'].str.lower().str.strip()
+        #     gender_map = {
+        #         'male': 'Male', 'm': 'Male', 'maile': 'Male', 'cis male': 'Male', 'male-ish': 'Other', # Example mapping
+        #         'female': 'Female', 'f': 'Female', 'cis female': 'Female', 'trans-female': 'Female', # Example mapping
+        #         # Add mappings for all variations encountered
+        #     }
+        #     df['Gender'] = df['Gender'].map(gender_map).fillna('Other/Prefer not to say') # Map and handle unmapped
+        #     logging.info("Normalized 'Gender' column.")
 
-# Define hyperparameter grids for the old models.
-rf_params_old = {
-    'n_estimators': [100, 200, 500],
-    'max_depth': [None, 10, 20],
-    'min_samples_split': [2, 5],
-    'min_samples_leaf': [1, 2]
-}
-xgb_params_old = {
-    'n_estimators': [100, 200, 500],
-    'max_depth': [3, 6, 10],
-    'learning_rate': [0.01, 0.1, 0.2]
-}
+        logging.info("Initial data cleaning finished.")
+        return df
 
-# Perform Grid Search with Cross-Validation for Random Forest using 'accuracy' as scoring.
-rf_grid_old = GridSearchCV(
-    RandomForestClassifier(random_state=42),
-    rf_params_old, cv=3, scoring='accuracy', n_jobs=-1
-)
-rf_grid_old.fit(X_train_old, y_train_old)
-rf_best_old = rf_grid_old.best_estimator_
+    except FileNotFoundError:
+        logging.error(f"Data file not found at {file_path}")
+        raise
+    except Exception as e:
+        logging.error(f"Error during data loading/cleaning: {e}")
+        raise
 
-# Perform Grid Search for XGBoost using 'accuracy' as scoring.
-xgb_grid_old = GridSearchCV(
-    XGBClassifier(eval_metric='logloss', use_label_encoder=False),
-    xgb_params_old, cv=3, scoring='accuracy', n_jobs=-1
-)
-xgb_grid_old.fit(X_train_old, y_train_old)
-xgb_best_old = xgb_grid_old.best_estimator_
+# --- Feature Engineering and Preprocessing ---
+def preprocess_features(df, target_col='depressiveness', test_size=0.2, random_state=42, models_dir='models'):
+    """Encodes categorical features, scales numerical features, and splits data."""
+    logging.info("Starting feature preprocessing...")
 
-# Evaluate the old models and store their metrics.
-metrics_rf_old = evaluate_model(rf_best_old, X_test_old, y_test_old, "Old Random Forest (suicidal)")
-metrics_xgb_old = evaluate_model(xgb_best_old, X_test_old, y_test_old, "Old XGBoost (suicidal)")
+    # --- Drop leaky/irrelevant columns (Keep this part) ---
+    columns_to_drop = [
+        'id', 'depression_severity', 'depression_diagnosis',
+        'depression_treatment', 'suicidal'
+    ]
+    columns_to_drop = [col for col in columns_to_drop if col in df.columns]
+    if columns_to_drop:
+        df_processed = df.drop(columns=columns_to_drop)
+        logging.info(f"Dropped potentially leaky/irrelevant columns: {columns_to_drop}")
+    else:
+        df_processed = df.copy()
 
-###############################################
-# 4. NEW PIPELINE: Target = 'anxiety_diagnosis'
-###############################################
-# This section implements the improved pipeline using 'anxiety_diagnosis' as the target.
+    X = df_processed.drop(target_col, axis=1)
+    y = df_processed[target_col]
 
-# Separate features and target. Remove 'anxiety_diagnosis' and 'id' from features.
-X_new = data.drop(columns=['anxiety_diagnosis', 'id'], errors='ignore')
-y_new = data['anxiety_diagnosis']
+    categorical_features = X.select_dtypes(include=['object', 'category']).columns
+    numerical_features = X.select_dtypes(include=np.number).columns
+    logging.info(f"Remaining Categorical features: {list(categorical_features)}")
+    logging.info(f"Remaining Numerical features: {list(numerical_features)}")
 
-# Use a Random Forest to determine feature importance and select the top 10 features.
-rf_fs_new = RandomForestClassifier(random_state=42)
-rf_fs_new.fit(X_new, y_new)
-fi_new = pd.DataFrame({'Feature': X_new.columns, 'Importance': rf_fs_new.feature_importances_})
-fi_new.sort_values(by='Importance', ascending=False, inplace=True)
-top_features_new = fi_new["Feature"].values[:10]
-X_new = X_new[top_features_new]
+    # --- Label Encoding for Categorical Features (Keep this part) ---
+    encoders = {}
+    X_encoded = X.copy()
+    for col in categorical_features:
+        # Handle potential NaNs before encoding if necessary, e.g., fill with a placeholder string
+        # X_encoded[col].fillna('Missing', inplace=True) # Example placeholder
+        le = LabelEncoder()
+        X_encoded[col] = le.fit_transform(X_encoded[col].astype(str))
+        encoders[col] = le
+        logging.info(f"Label encoded '{col}'.")
 
-# Split the new data into training and testing sets.
-X_train_new, X_test_new, y_train_new, y_test_new = train_test_split(
-    X_new, y_new, test_size=0.2, random_state=42
-)
+    # --- Target Encoding (Keep this part) ---
+    target_encoder = LabelEncoder()
+    y_encoded = target_encoder.fit_transform(y)
+    logging.info(f"Target variable '{target_col}' encoded.")
+    logging.info(f"Target classes: {target_encoder.classes_}")
 
-# Standardize features for the new pipeline.
-scaler_new = StandardScaler()
-X_train_new = scaler_new.fit_transform(X_train_new)
-X_test_new = scaler_new.transform(X_test_new)
+    # --- Data Splitting (Keep this part) ---
+    X_train, X_test, y_train, y_test = train_test_split(
+        X_encoded, y_encoded, test_size=test_size, random_state=random_state, stratify=y_encoded
+    )
+    logging.info(f"Data split into training ({len(X_train)} samples) and testing ({len(X_test)} samples).")
 
-# Compute the ratio of negative to positive cases for XGBoost to handle class imbalance.
-neg_count_new = sum(y_train_new == 0)
-pos_count_new = sum(y_train_new == 1)
-scale_pos_weight_new = neg_count_new / pos_count_new if pos_count_new != 0 else 1
+    # --- Scaling Numerical Features (Keep this part) ---
+    scaler = StandardScaler()
+    X_train_scaled = X_train.copy()
+    X_test_scaled = X_test.copy()
+    # Ensure numerical_features list is accurate *after* potential drops
+    numerical_features_in_train = [col for col in numerical_features if col in X_train.columns]
+    if numerical_features_in_train: # Check if there are any numerical features left
+        X_train_scaled[numerical_features_in_train] = scaler.fit_transform(X_train[numerical_features_in_train])
+        logging.info("Scaler fitted on training data.")
+        X_test_scaled[numerical_features_in_train] = scaler.transform(X_test[numerical_features_in_train])
+        logging.info("Training and testing numerical features scaled.")
+    else:
+        logging.warning("No numerical features found to scale.")
 
-# Define hyperparameter grids for the new models.
-rf_params_new = {
-    'n_estimators': [100, 200, 500],
-    'max_depth': [None, 10, 20],
-    'min_samples_split': [2, 5],
-    'min_samples_leaf': [1, 2]
-}
-xgb_params_new = {
-    'n_estimators': [100, 200, 500],
-    'max_depth': [3, 6, 10],
-    'learning_rate': [0.01, 0.1, 0.2],
-    'scale_pos_weight': [scale_pos_weight_new]  # This parameter addresses class imbalance.
-}
 
-# Perform Grid Search for the new Random Forest using 'f1' as scoring and class balancing.
-rf_grid_new = GridSearchCV(
-    RandomForestClassifier(random_state=42, class_weight='balanced'),
-    rf_params_new, cv=3, scoring='f1', n_jobs=-1
-)
-rf_grid_new.fit(X_train_new, y_train_new)
-rf_best_new = rf_grid_new.best_estimator_
+    # *** ADD THIS: Ensure all columns are float type before returning ***
+    try:
+        X_train_scaled = X_train_scaled.astype(float)
+        X_test_scaled = X_test_scaled.astype(float)
+        logging.info("Converted scaled training and testing DataFrames to float type.")
+    except ValueError as e:
+        logging.error(f"Could not convert DataFrame to float after scaling/encoding. Error: {e}")
+        # Optionally: Log the dtypes to debug which column is failing
+        logging.error(f"X_train_scaled dtypes before conversion attempt:\n{X_train_scaled.dtypes}")
+        raise # Re-raise the error after logging
 
-# Perform Grid Search for the new XGBoost using 'f1' as scoring.
-xgb_grid_new = GridSearchCV(
-    XGBClassifier(eval_metric='logloss', use_label_encoder=False),
-    xgb_params_new, cv=3, scoring='f1', n_jobs=-1
-)
-xgb_grid_new.fit(X_train_new, y_train_new)
-xgb_best_new = xgb_grid_new.best_estimator_
 
-# Evaluate the new models and store their metrics.
-metrics_rf_new = evaluate_model(rf_best_new, X_test_new, y_test_new, "New Random Forest (anxiety_diagnosis)")
-metrics_xgb_new = evaluate_model(xgb_best_new, X_test_new, y_test_new, "New XGBoost (anxiety_diagnosis)")
+    # --- Save artifacts (Keep this part) ---
+    os.makedirs(models_dir, exist_ok=True)
+    joblib.dump(scaler, os.path.join(models_dir, 'scaler.joblib'))
+    joblib.dump(encoders, os.path.join(models_dir, 'label_encoders.joblib'))
+    joblib.dump(target_encoder, os.path.join(models_dir, 'target_encoder.joblib'))
+    # Save the final feature list (columns of X_train_scaled)
+    joblib.dump(list(X_train_scaled.columns), os.path.join(models_dir, 'features.joblib'))
+    # Update saved numerical/categorical lists based on final columns if needed by UI
+    # It might be simpler just to save the final columns list ('features.joblib')
+    # and have the UI determine num/cat based on the loaded data's dtypes before scaling.
+    # For now, let's keep saving the original lists identified before split/scale.
+    joblib.dump(numerical_features.tolist(), os.path.join(models_dir, 'numerical_features.joblib'))
+    joblib.dump(categorical_features.tolist(), os.path.join(models_dir, 'categorical_features.joblib'))
+    logging.info(f"Scaler, encoders, and updated feature lists saved to {models_dir}.")
 
-###############################################
-# 5. Compare Old vs. New Models and Calculate Average Accuracy
-###############################################
-# Combine the metrics from all four models into a single DataFrame.
-comparison_data = {
-    "Old RF (suicidal)": metrics_rf_old,
-    "Old XGB (suicidal)": metrics_xgb_old,
-    "New RF (anxiety_diagnosis)": metrics_rf_new,
-    "New XGB (anxiety_diagnosis)": metrics_xgb_new,
-}
-comparison_df = pd.DataFrame(comparison_data).T
-print("Overall Model Comparison:")
-print(comparison_df)
 
-# Calculate the average accuracy across all models.
-avg_accuracy_suicidal = ( metrics_rf_old['Accuracy'] + metrics_xgb_old['Accuracy'] ) / 2
-avg_accuracy_anxiety = ( metrics_rf_new['Accuracy'] + metrics_xgb_new['Accuracy'] ) / 2
-print("Average Accuracy across all models: {:.4f}%".format(avg_accuracy_suicidal*100))
-print("Average Accuracy across all models: {:.4f}%".format(avg_accuracy_anxiety*100))
+    return X_train_scaled, X_test_scaled, y_train, y_test, target_encoder
 
-# Plot a grouped bar chart for the performance metrics.
-metrics_list = ["Accuracy", "Precision", "Recall", "F1 Score", "ROC-AUC"]
-# Convert all metric values to numeric type.
-for metric in metrics_list:
-    comparison_df[metric] = pd.to_numeric(comparison_df[metric], errors='coerce')
+# --- Model Training ---
+def train_evaluate_model(X_train, y_train, X_test, y_test, model_type='random_forest', config=None, target_encoder=None):
+    """Trains and evaluates a specified model type."""
+    logging.info(f"Starting training for {model_type}...")
 
-ax = comparison_df[metrics_list].plot(kind='bar', figsize=(12, 8))
-plt.title("Model Performance Comparison: Old vs New Pipelines")
-plt.ylabel("Score")
-plt.xticks(rotation=45, ha='right')
-plt.ylim(0, 1)
-plt.legend(title="Metrics", bbox_to_anchor=(1.05, 1), loc='upper left')
-plt.tight_layout()
-plt.savefig("models/model_comparison.png")
-plt.show()
+    # --- Model Selection and Training (Random Forest part shown) ---
+    if model_type == 'random_forest':
+        param_grid_rf = {
+            'n_estimators': [100, 200],
+            'max_depth': [None, 10, 20],
+            'min_samples_split': [2, 5]
+        }
+        rf = RandomForestClassifier(random_state=42, class_weight='balanced')
+        grid_search_rf = GridSearchCV(estimator=rf, param_grid=param_grid_rf, cv=5, n_jobs=-1, scoring='f1_weighted', verbose=1)
+        grid_search_rf.fit(X_train, y_train)
+        best_rf = grid_search_rf.best_estimator_
+        model = best_rf
+        logging.info(f"Random Forest best params: {grid_search_rf.best_params_}")
+        model_filename = config['models']['random_forest_file']
 
-###############################################
-# 6. SHAP Interpretation for New Random Forest Model
-###############################################
-# Create a SHAP explainer object for the new Random Forest model.
-explainer = shap.TreeExplainer(rf_best_new, X_train_new)
-shap_values = explainer.shap_values(X_test_new, check_additivity=False)
-# For binary classification, select the SHAP values corresponding to the positive class.
-if isinstance(shap_values, list):
-    shap_vals_to_plot = shap_values[1]
-else:
-    shap_vals_to_plot = shap_values
+    elif model_type == 'xgboost':
+         # (Keep XGBoost logic as before)
+        param_grid_xgb = {
+            'n_estimators': [100, 200],
+            'learning_rate': [0.01, 0.1],
+            'max_depth': [3, 5]
+        }
+        # Ensure num_class is correctly set for multi-class if needed, for binary it's usually handled
+        num_classes = len(target_encoder.classes_)
+        xgb_clf = xgb.XGBClassifier(objective='binary:logistic' if num_classes == 2 else 'multi:softmax',
+                                    # num_class=num_classes if num_classes > 2 else None, # Usually not needed for binary
+                                    random_state=42, use_label_encoder=False, eval_metric='logloss' if num_classes == 2 else 'mlogloss')
+        grid_search_xgb = GridSearchCV(estimator=xgb_clf, param_grid=param_grid_xgb, cv=5, n_jobs=-1, scoring='f1_weighted', verbose=1)
+        grid_search_xgb.fit(X_train, y_train)
+        best_xgb = grid_search_xgb.best_estimator_
+        model = best_xgb
+        logging.info(f"XGBoost best params: {grid_search_xgb.best_params_}")
+        model_filename = config['models']['xgboost_file']
+    else:
+        logging.error(f"Unsupported model type: {model_type}")
+        return None
 
-# Generate and save a SHAP summary plot.
-shap.summary_plot(shap_vals_to_plot, X_test_new, show=False)
-plt.savefig('models/shap_summary.png')
-plt.close()
+    # --- Evaluation ---
+    y_pred = model.predict(X_test)
+    accuracy = accuracy_score(y_test, y_pred)
+    f1 = f1_score(y_test, y_pred, average='weighted') # Use 'binary' if it's strictly binary or 'weighted'/'macro'
 
-###############################################
-# 7. Save New Models and Artifacts
-###############################################
-# Save the new trained models, scaler, and selected features using joblib.
-os.makedirs("models", exist_ok=True)
-joblib.dump(rf_best_new, os.path.join("models", "new_random_forest_model.pkl"))
-joblib.dump(xgb_best_new, os.path.join("models", "new_xgboost_model.pkl"))
-joblib.dump(scaler_new, os.path.join("models", "new_scaler.pkl"))
-joblib.dump(top_features_new, os.path.join("models", "new_selected_features.pkl"))
+    # *** FIX HERE: Convert boolean class names to strings ***
+    target_names_str = [str(cls) for cls in target_encoder.classes_]
 
-print("Data preprocessing, model training, and evaluation complete. Models and artifacts saved.")
+    # Now use the string version for the report
+    report = classification_report(y_test, y_pred, target_names=target_names_str)
+    conf_matrix = confusion_matrix(y_test, y_pred)
+
+    logging.info(f"--- {model_type} Evaluation ---")
+    logging.info(f"Accuracy: {accuracy:.4f}")
+    logging.info(f"F1 Score (Weighted): {f1:.4f}")
+    logging.info(f"Classification Report:\n{report}")
+    logging.info(f"Confusion Matrix:\n{conf_matrix}")
+
+    # Save the trained model
+    model_path = os.path.join(config['models']['output_dir'], model_filename)
+    joblib.dump(model, model_path)
+    logging.info(f"{model_type} model saved to {model_path}")
+
+    return model
+
+# --- Main Execution ---
+if __name__ == "__main__":
+    warnings.filterwarnings('ignore', category=UserWarning, module='sklearn')
+    warnings.filterwarnings('ignore', category=FutureWarning) # Suppress XGBoost warning if needed
+
+    try:
+        config = load_config() # Load config from default path "config.yaml"
+        models_dir = Path(config['models']['output_dir'])
+        models_dir.mkdir(parents=True, exist_ok=True) # Ensure model dir exists
+
+        data_path = config['data']['raw_depression_anxiety']
+        df_cleaned = load_and_clean_data(data_path)
+
+        if df_cleaned is not None and not df_cleaned.empty:
+            X_train, X_test, y_train, y_test, target_encoder = preprocess_features(
+                df_cleaned,
+                models_dir=str(models_dir) # Pass models_dir as string
+                # target_col='depressiveness' # Keep default or specify if different
+            )
+
+            # Train and evaluate models
+            logging.info("\n--- Training Random Forest ---")
+            rf_model = train_evaluate_model(X_train, y_train, X_test, y_test, 'random_forest', config, target_encoder)
+
+            logging.info("\n--- Training XGBoost ---")
+            xgb_model = train_evaluate_model(X_train, y_train, X_test, y_test, 'xgboost', config, target_encoder)
+
+            logging.info("\nScript finished successfully.")
+
+    except Exception as e:
+        logging.critical(f"Script failed: {e}", exc_info=True) # Log full traceback
